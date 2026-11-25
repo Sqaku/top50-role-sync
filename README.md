@@ -1,24 +1,22 @@
 # Top 50 Discord role sync (Mine for Diamonds)
 
-Every 15 minutes a free GitHub Actions job reads the game's global leaderboards (Cash, Rebirths, Gems,
+Every 30 minutes a free GitHub Actions job reads the game's global leaderboards (Cash, Rebirths, Gems,
 Time) from Roblox Open Cloud, finds everyone in the Top 50 on ANY of them (staff excluded, same as the
-game), looks up their Discord through RoVer, and adds/removes the Top 50 role. No server to keep on.
+game), looks up their Discord through RoVer, and adds/removes the `🏆#TOP 50` role in 64 CCU Games.
+No server to keep on.
 
-Players must be verified with RoVer in the server, or the bot can't know who they are.
+Players must be verified with RoVer in the server (and allow the server to see their link), or the bot
+can't know who they are.
 
-## Setup (secrets are yours to paste, never share them in chat)
+## Setup
+- Discord app: Top 50 Sync (1575095767721447525), Server Members Intent on, its role sits above `#TOP 50`.
+- Roblox Open Cloud key: ordered-data-stores read, Mine for Diamonds (universe 10776126654) only.
+- RoVer server key: rover.link → 64 CCU Games → Developer API.
+- Repo secrets (Settings → Secrets and variables → Actions): `DISCORD_TOKEN`, `ROBLOX_API_KEY`, `ROVER_KEY`.
+- Repo variable `LIVE` = `1` turns real role changes on for scheduled runs. Without it every run is a dry run.
+- Optional variables: `GUILD_ID` (default 64 CCU Games), `ROLE_ID` / `ROLE_NAME` (default finds "#TOP 50"),
+  `UNIVERSE_ID`, `TOP_N` (default 50).
 
-1. **Discord bot** — discord.com/developers → New Application → Bot. Turn ON *Server Members Intent*.
-   Copy the token. Invite it with the `Manage Roles` permission:
-   `https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=268435456`
-   In Server Settings → Roles, drag the bot's role **above** the Top 50 role.
-2. **Roblox Open Cloud key** — create.roblox.com → Open Cloud → API Keys → Create.
-   Access: *ordered-data-stores* → universe Mine for Diamonds (10776126654) → **Read** only (`universe.ordered-data-store.scope.entry:read`).
-3. **RoVer key** — rover.link dashboard → your server → API → create a key.
-4. **GitHub repo** (private) with these files. Settings → Secrets and variables → Actions:
-   - Secrets: `DISCORD_TOKEN`, `ROBLOX_API_KEY`, `ROVER_KEY`
-   - Variables: `GUILD_ID` (server id), `ROLE_ID` (the Top 50 role id)
-5. Actions tab → *Top 50 role sync* → Run workflow with **Dry run** ticked. Check the log, then let the
-   schedule take over (scheduled runs change roles for real).
+Manual run: Actions → *Top 50 role sync* → Run workflow (Dry run ticked = log only).
 
 Local run: copy `.env.example` to `.env`, fill it, `node --env-file=.env sync.mjs`.

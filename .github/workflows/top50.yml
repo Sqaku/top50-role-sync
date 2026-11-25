@@ -28,4 +28,5 @@ jobs:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           ROBLOX_API_KEY: ${{ secrets.ROBLOX_API_KEY }}
           ROVER_KEY: ${{ secrets.ROVER_KEY }}
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
+          # Scheduled runs only change roles once the repo variable LIVE is "1"; manual runs follow the checkbox.
+          DRY_RUN: ${{ ((github.event_name == 'workflow_dispatch' && inputs.dry_run) || (github.event_name != 'workflow_dispatch' && vars.LIVE != '1')) && '1' || '0' }}
