@@ -1,22 +1,25 @@
-// Top 50 Discord role sync for Mine for Diamonds.
-// One run = read the game's global leaderboards from Roblox Open Cloud, work out who is Top 50 on ANY
-// reward board (Cash / Rebirths / Gems / Time, the same rule as the in-game Top 50 reward), look each
-// player's Discord account up through RoVer, then add the role to everyone in and remove it from
-// everyone who dropped out. Plain REST, no gateway, so it runs fine as a short scheduled job.
+// Top-rank Discord role sync for Mine for Diamonds.
+// One run = read the game's global leaderboards from Roblox Open Cloud, take each player's BEST rank on any
+// reward board (Cash / Rebirths / Gems / Time, the same boards as the in-game Top 50 reward), map it to one
+// tier role (#TOP 1 / #TOP 5 / #TOP 25 / #TOP 50), look the player's Discord account up through RoVer, then
+// give every linked member exactly their tier role and take the other tier roles away. Plain REST, no
+// gateway, so it runs fine as a short scheduled job.
 //
 // Env (secrets): DISCORD_TOKEN, ROBLOX_API_KEY, ROVER_KEY
-// Env (config):  GUILD_ID (default 64 CCU Games), ROLE_ID or ROLE_NAME (default "#TOP 50"), UNIVERSE_ID (default 10776126654), TOP_N (default 50), DRY_RUN=1
+// Env (config):  GUILD_ID (default 64 CCU Games), UNIVERSE_ID (default 10776126654), DRY_RUN=1
 
 const env = process.env;
 const UNIVERSE_ID = env.UNIVERSE_ID || "10776126654"; // live game (10778194646 is the tester place)
-const TOP_N = Number(env.TOP_N || 50);
 const DRY_RUN = env.DRY_RUN === "1";
 const GUILD_ID = env.GUILD_ID || "1534863884438208632"; // 64 CCU Games
-const ROLE_NAME = env.ROLE_NAME || "#TOP 50"; // matched inside the role name, so the emoji prefix is fine
-let ROLE_ID = env.ROLE_ID || "";
 for (const k of ["DISCORD_TOKEN", "ROBLOX_API_KEY", "ROVER_KEY"]) {
   if (!env[k]) throw new Error(`Missing env ${k}`);
 }
+
+// Tiers, best first. A role is found by the exact "#TOP <n>" in its name (so "#TOP 5" never matches
+// "#TOP 50"); emoji and colour are whatever the role has in Discord.
+const TIERS = [1, 5, 25, 50];
+const TOP_N = TIERS[TIERS.length - 1];
 
 // Mirrors ServerScriptService.Services.LeaderboardService: staff never rank (EXCLUDED + Modules.Admins).
 const EXCLUDED = new Set([1141781773, 2252609335, 287525045, 70355390, 28960880, 1334742580]);
@@ -49,7 +52,7 @@ async function http(url, opts = {}, tries = 4) {
 }
 
 // Top entries of one ordered data store, best first, staff removed. Throws on any failure so a bad
-// read never strips roles from people who are still in the Top 50.
+// read never strips roles from people who are still ranked.
 async function readStore(name, depth, decode = (v) => v) {
   const list = [];
   let pageToken = "";
@@ -98,82 +101,101 @@ async function discordIdsFor(robloxId) {
 const discord = (path, method = "GET") =>
   http(`https://discord.com/api/v10${path}`, {
     method,
-    headers: { Authorization: `Bot ${env.DISCORD_TOKEN}`, "X-Audit-Log-Reason": "Top 50 leaderboard sync" },
+    headers: { Authorization: `Bot ${env.DISCORD_TOKEN}`, "X-Audit-Log-Reason": "Top leaderboard role sync" },
   });
+
+// tier -> { id, name }. Throws unless every tier has exactly one role, so a renamed role never causes
+// mass removals.
+async function resolveRoles() {
+  const res = await discord(`/guilds/${GUILD_ID}/roles`);
+  if (!res.ok) throw new Error(`Discord roles: ${res.status} ${await res.text()}`);
+  const roles = await res.json();
+  const byTier = new Map();
+  for (const tier of TIERS) {
+    const hits = roles.filter((r) => new RegExp(`#TOP ${tier}(?!\\d)`).test(r.name));
+    if (hits.length !== 1) throw new Error(`Expected 1 role named "#TOP ${tier}", found ${hits.length}`);
+    byTier.set(tier, { id: hits[0].id, name: hits[0].name });
+    console.log(`Role for top ${tier}: ${hits[0].name} (${hits[0].id})`);
+  }
+  return byTier;
+}
 
 const names = new Map(); // Discord id -> "username (server nickname)", for the log
 
-async function membersWithRole() {
-  const have = new Set();
-  const all = new Set();
+// Every member: their name for the log and which tier roles they hold now.
+async function members(roleIds) {
+  const held = new Map(); // Discord id -> Set of tier role ids
   let after = "0";
   for (;;) {
     const res = await discord(`/guilds/${GUILD_ID}/members?limit=1000&after=${after}`);
     if (!res.ok) throw new Error(`Discord members: ${res.status} ${await res.text()}`);
     const page = await res.json();
     for (const m of page) {
-      all.add(m.user.id);
       names.set(m.user.id, m.nick ? `${m.user.username} (${m.nick})` : m.user.username);
-      if (m.roles.includes(ROLE_ID)) have.add(m.user.id);
+      held.set(m.user.id, new Set(m.roles.filter((r) => roleIds.has(r))));
     }
     if (page.length < 1000) break;
     after = page[page.length - 1].user.id;
   }
-  return { have, all };
-}
-
-async function resolveRole() {
-  if (ROLE_ID) return;
-  const res = await discord(`/guilds/${GUILD_ID}/roles`);
-  if (!res.ok) throw new Error(`Discord roles: ${res.status} ${await res.text()}`);
-  const hits = (await res.json()).filter((r) => r.name.includes(ROLE_NAME));
-  if (hits.length !== 1) throw new Error(`Expected 1 role containing "${ROLE_NAME}", found ${hits.length}; set ROLE_ID`);
-  ROLE_ID = hits[0].id;
-  console.log(`Role: ${hits[0].name} (${ROLE_ID})`);
+  return held;
 }
 
 async function main() {
-  await resolveRole();
-  const top = new Set();
+  const roles = await resolveRoles();
+  const roleIds = new Set([...roles.values()].map((r) => r.id));
+
+  // best (lowest) rank of each Roblox player across the boards
+  const best = new Map();
   for (const board of BOARDS) {
     const ids = await topOf(board);
     console.log(`${board.key}: ${ids.length} ranked`);
-    ids.forEach((id) => top.add(id));
+    ids.forEach((id, i) => best.set(id, Math.min(best.get(id) ?? Infinity, i + 1)));
   }
-  console.log(`Top ${TOP_N} on any board: ${top.size} Roblox players`);
+  console.log(`Top ${TOP_N} on any board: ${best.size} Roblox players`);
 
-  const want = new Set();
+  // Discord member -> the tier they earned (best across all their linked Roblox accounts)
+  const tierOf = new Map();
   let unlinked = 0;
-  for (const robloxId of top) {
+  for (const [robloxId, rank] of best) {
     const ids = await discordIdsFor(robloxId);
     if (ids.length === 0) unlinked++;
-    ids.forEach((id) => want.add(id));
+    const tier = TIERS.find((t) => rank <= t);
+    for (const id of ids) tierOf.set(id, Math.min(tierOf.get(id) ?? Infinity, tier));
     await sleep(2100); // RoVer allows 5 requests per 10 s per server
   }
-  console.log(`Linked Discord accounts: ${want.size} (${unlinked} players not verified with RoVer)`);
+  console.log(`Linked Discord accounts: ${tierOf.size} (${unlinked} players not verified with RoVer)`);
 
-  const { have, all } = await membersWithRole();
-  const toAdd = [...want].filter((id) => all.has(id) && !have.has(id));
-  const toRemove = [...have].filter((id) => !want.has(id));
-  console.log(`Add: ${toAdd.length}, remove: ${toRemove.length}${DRY_RUN ? " (dry run, nothing changed)" : ""}`);
+  const held = await members(roleIds);
+  const changes = []; // { id, method, tier }
+  for (const [id, have] of held) {
+    const tier = tierOf.get(id);
+    const wantRole = tier ? roles.get(tier).id : null;
+    if (wantRole && !have.has(wantRole)) changes.push({ id, method: "PUT", tier });
+    for (const t of TIERS) {
+      const roleId = roles.get(t).id;
+      if (have.has(roleId) && roleId !== wantRole) changes.push({ id, method: "DELETE", tier: t });
+    }
+  }
+
   const label = (id) => names.get(id) || id;
-  if (toAdd.length) console.log(`  + ${toAdd.map(label).join(", ")}`);
-  if (toRemove.length) console.log(`  - ${toRemove.map(label).join(", ")}`);
+  console.log(`Changes: ${changes.length}${DRY_RUN ? " (dry run, nothing changed)" : ""}`);
+  for (const tier of TIERS) {
+    const add = changes.filter((c) => c.method === "PUT" && c.tier === tier).map((c) => label(c.id));
+    const del = changes.filter((c) => c.method === "DELETE" && c.tier === tier).map((c) => label(c.id));
+    if (add.length) console.log(`  + ${roles.get(tier).name}: ${add.join(", ")}`);
+    if (del.length) console.log(`  - ${roles.get(tier).name}: ${del.join(", ")}`);
+  }
   if (DRY_RUN) return;
 
   let failed = 0;
-  for (const [ids, method] of [[toAdd, "PUT"], [toRemove, "DELETE"]]) {
-    for (const id of ids) {
-      const res = await discord(`/guilds/${GUILD_ID}/members/${id}/roles/${ROLE_ID}`, method);
-      if (!res.ok) {
-        failed++;
-        console.error(`${method} ${id}: ${res.status} ${await res.text()}`);
-      }
+  for (const c of changes) {
+    const res = await discord(`/guilds/${GUILD_ID}/members/${c.id}/roles/${roles.get(c.tier).id}`, c.method);
+    if (!res.ok) {
+      failed++;
+      console.error(`${c.method} ${label(c.id)} ${roles.get(c.tier).name}: ${res.status} ${await res.text()}`);
     }
   }
-  if (failed) {
-    process.exitCode = 1;
-  }
+  if (failed) process.exitCode = 1;
 }
 
 main().catch((err) => {
