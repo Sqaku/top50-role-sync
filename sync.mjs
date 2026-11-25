@@ -101,6 +101,8 @@ const discord = (path, method = "GET") =>
     headers: { Authorization: `Bot ${env.DISCORD_TOKEN}`, "X-Audit-Log-Reason": "Top 50 leaderboard sync" },
   });
 
+const names = new Map(); // Discord id -> "username (server nickname)", for the log
+
 async function membersWithRole() {
   const have = new Set();
   const all = new Set();
@@ -111,6 +113,7 @@ async function membersWithRole() {
     const page = await res.json();
     for (const m of page) {
       all.add(m.user.id);
+      names.set(m.user.id, m.nick ? `${m.user.username} (${m.nick})` : m.user.username);
       if (m.roles.includes(ROLE_ID)) have.add(m.user.id);
     }
     if (page.length < 1000) break;
@@ -153,6 +156,9 @@ async function main() {
   const toAdd = [...want].filter((id) => all.has(id) && !have.has(id));
   const toRemove = [...have].filter((id) => !want.has(id));
   console.log(`Add: ${toAdd.length}, remove: ${toRemove.length}${DRY_RUN ? " (dry run, nothing changed)" : ""}`);
+  const label = (id) => names.get(id) || id;
+  if (toAdd.length) console.log(`  + ${toAdd.map(label).join(", ")}`);
+  if (toRemove.length) console.log(`  - ${toRemove.map(label).join(", ")}`);
   if (DRY_RUN) return;
 
   let failed = 0;
